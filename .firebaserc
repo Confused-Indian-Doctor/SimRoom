@@ -1,0 +1,24 @@
+{
+  "projects": {
+    "default": "simroom-60e9f",
+    "production": "simroom-60e9f",
+    "emulator": "demo-simroom"
+  },
+  "targets": {
+    "simroom-60e9f": {
+      "hosting": {
+        "cidsimroom": [
+          "cidsimroom"
+        ]
+      }
+    },
+    "demo-simroom": {
+      "hosting": {
+        "cidsimroom": [
+          "demo-simroom"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}

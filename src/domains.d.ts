@@ -1,0 +1,10 @@
+import type {Session,Scenario,PatientValue,EngineCondition,AuthoredModel} from './types';
+export const observationUnits:Record<string,string>;
+export const mechanismSpecs:Record<string,{label:string;choices?:string[];unit?:string;min?:number;max?:number;integer?:boolean;text?:boolean}>;
+export const lifecycle:string[];
+export function simTime(s:Session,wall:number):number;
+export function resolvePatient(s:Session,at:number):Record<string,PatientValue>;
+export function conditionMet(c:EngineCondition,s:Session,at:number):boolean;
+export function validateDomains(s:Scenario):Scenario;
+export function validateTarget(path:string,value:PatientValue,unit?:string,allowNull?:boolean):void;
+export function initialiseDomains(s:Session,wall:number):Session;
