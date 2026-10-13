@@ -1,10 +1,13 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import {
   applyCommand,
+  processCommand,
+  replaySession,
   createSession,
   monitorState,
   validateScenario,
 } from "../_shared/engine.js";
+import {canonical} from "../_shared/domains.js";
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
@@ -33,13 +36,23 @@ Deno.serve(async (req) => {
     const db = createClient(url, key, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
+    const {operation,data={}}=await req.json();
+    if(operation==='advanceDue'){
+      const expected=Deno.env.get('SIMROOM_SCHEDULER_SECRET');
+      if(!expected||req.headers.get('x-simroom-scheduler')!==expected)return response({message:'Scheduler authentication required'},403);
+      const rows=check(await db.from('sessions').select('id,owner,state,revision').eq('state->>status','running').order('state->>updatedAt',{ascending:true}).limit(20));
+      let advanced=0;
+      for(const row of rows){const now=Number(check(await db.rpc('server_time')));const result=processCommand(row.state,{id:`worker:${row.id}:${Math.floor(now/1000)}`,type:'tick'},Math.max(now,row.state.updatedAt));
+        const ok=check(await db.rpc('commit_session',{p_id:row.id,p_owner:row.owner,p_expected:row.revision,p_state:result.state,p_public:monitorState(result.state,now)}));if(ok){advanced++;if(!result.accepted)check(await db.from("session_attempts").insert({session_id:row.id,user_id:null,command:{type:"tick",source:"backend scheduler"},accepted:false,reason:result.error}));}
+      }
+      return response({advanced});
+    }
     const token = req.headers.get("Authorization")?.replace(/^Bearer\s+/i, "");
     if (!token) return response({ message: "Sign in required" }, 401);
     const auth = await db.auth.getUser(token);
     if (auth.error || !auth.data.user)
       return response({ message: "Invalid sign-in" }, 401);
     const uid = auth.data.user.id;
-    const { operation, data = {} } = await req.json();
     const faculty = !!check(
       await db
         .from("instructors")
@@ -146,12 +159,12 @@ Deno.serve(async (req) => {
         );
         if (!row)
           return response({ message: "Session owner required" }, 403);
-        const now = Number(check(await db.rpc("server_time"))),
-          state = applyCommand(row.state, data.command, now);
         const link=check(await db.from("controller_links").select("user_id,device").eq("session_id",row.id).maybeSingle());
-        if(!faculty || (link ? link.user_id!==uid || link.device!==String(data.device||"") : row.owner!==uid)) return response({message:"Another device controls this session; pair or confirm takeover"},403);
+        if(!faculty || (link ? link.user_id!==uid || link.device!==String(data.device||"") : row.owner!==uid))return response({message:"Another device controls this session; pair or confirm takeover"},403);
         if(check(await db.from("revoked_controllers").select("device").eq("session_id",row.id).eq("user_id",uid).eq("device",String(data.device||"")).maybeSingle()))return response({message:"Controller disconnected; pair again"},403);
-        if(state.revision===row.revision) return response({revision:state.revision});
+        const now=Math.max(Number(check(await db.rpc('server_time'))),row.state.updatedAt);
+        const result=processCommand(row.state,data.command,now),state=result.state;
+        if(result.duplicate){check(await db.from('session_attempts').insert({session_id:row.id,user_id:uid,command:data.command,accepted:true,duplicate:true}));return response({revision:row.revision,duplicate:true});}
         const accepted = check(
           await db.rpc("control_commit", {
             p_id: row.id,
@@ -162,12 +175,20 @@ Deno.serve(async (req) => {
             p_public: monitorState(state, now),
           }),
         );
-        if (accepted) return response({ revision: state.revision });
+        if(accepted){check(await db.from('session_attempts').insert({session_id:row.id,user_id:uid,command:data.command,accepted:result.accepted,reason:result.error||null}));return response(result.accepted?{revision:state.revision}:{message:result.error,revision:state.revision},result.accepted?200:400);}
       }
       return response(
         { message: "Session busy; retry the same command identifier" },
         409,
       );
+    }
+    if(['replay','audit'].includes(operation)){
+      const row=check(await db.from('sessions').select('owner,state').eq('id',data.session).maybeSingle());
+      const link=check(await db.from('controller_links').select('user_id').eq('session_id',data.session).eq('user_id',uid).maybeSingle());
+      if(!faculty||!row||!(row.owner===uid||link))return response({message:'Faculty session access required'},403);
+      const records:any[]=[];for(let offset=0;;offset+=1000){const page=check(await db.from('session_commands').select('record').eq('session_id',data.session).order('sequence').range(offset,offset+999));records.push(...page);if(page.length<1000)break;}
+      if(operation==='audit'){const collect=async(table:string,fields:string)=>{const all:any[]=[];for(let offset=0;;offset+=1000){const page=check(await db.from(table).select(fields).eq('session_id',data.session).order('at').order('id').range(offset,offset+999));all.push(...page);if(page.length<1000)return all;}};const attempts=await collect('session_attempts','at,command,accepted,reason,duplicate'),access=await collect('session_access_events','at,kind');return response({commands:records.map((r:any)=>r.record),attempts,access});}
+      const restored=replaySession(row.state,records.map((r:any)=>r.record));return response({state:restored,matches:canonical(restored.observations)===canonical(row.state.observations),domainMatches:canonical(JSON.parse(JSON.stringify([restored.engine.patient,restored.engine.measurements,restored.engine.learners,restored.engine.scheduler,restored.status,restored.elapsed])))===canonical([row.state.engine.patient,row.state.engine.measurements,row.state.engine.learners,row.state.engine.scheduler,row.state.status,row.state.elapsed]),commands:records.length});
     }
     if (operation === "saveScenario") {
       const draft = validateScenario(data.scenario);
@@ -192,14 +213,12 @@ Deno.serve(async (req) => {
           .eq("user_id", uid)
           .maybeSingle(),
       );
-      if (
-        !(faculty && (row.owner === uid || !!check(await db.from("controller_links").select("user_id").eq("session_id",data.session).eq("user_id",uid).maybeSingle()))) &&
-        (!member || !row.state.investigations[data.investigation]?.released)
-      )
-        return response({ message: "Result not released" }, 403);
-      const item = row.state.scenario.investigations.find(
-        (i: any) => i.id === data.investigation,
-      );
+      const facultyAccess=faculty&&(row.owner===uid||!!check(await db.from('controller_links').select('user_id').eq('session_id',data.session).eq('user_id',uid).maybeSingle()));
+      const results=row.state.engine?.measurements?.results||[];
+      const result=data.instance?results.find((r:any)=>r.id===data.instance&&r.investigation===data.investigation):results.filter((r:any)=>r.investigation===data.investigation&&r.releasedAt!=null).at(-1);
+      if(!facultyAccess && (!member || (data.instance ? !result || result.releasedAt==null : !row.state.investigations[data.investigation]?.released)))return response({message:'Result not released'},403);
+      const definition=row.state.scenario.investigations.find((i:any)=>i.id===data.investigation);
+      const item=result?.acquiredAt!=null?{...definition,report:result.report,assetPath:result.assetPath}:definition;
       if (item?.report) {
         const bytes = new TextEncoder().encode(item.report);
         let binary = "";

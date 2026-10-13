@@ -1,11 +1,15 @@
+import {initialiseDomains,domainCommand,advanceScheduler,syncLegacyChange,recordCommand,simTime,canonical,resolvePatient,publicMeasurements,validateDomains,checkpoint,syncPatient,refreshMeasurements} from "./domains.js";
 import {ruleMatches,ruleSummary,validateRules,limits} from "./rules.js";
 export const fields = ["hr", "spo2", "sbp", "dbp", "rr", "temp"];
 export const interventionStates = [
+  "considered",
   "requested",
   "prescribed",
+  "prepared",
   "administered",
   "performed",
   "effective",
+  "reassessed",
 ];
 export function activeProfile(s) {
   const b = s.scenario.branches?.find((b) => b.id === s.branch);
@@ -37,7 +41,7 @@ export function conditionsMet(s, condition, now) {
   );
 }
 function setProfile(s, target, now, duration = 0) {
-  const old = values(s, now);
+  const old = valuesLegacy(s, now);
   s.observations = Object.fromEntries(
     fields.map((k) => [k, s.pins[k] ? old[k] : (target[k] ?? old[k])]),
   );
@@ -71,7 +75,7 @@ function selectBranch(s, b, now, confirmed) {
 export function elapsed(s, now) {
   return s.elapsed + (s.status === "running" ? Math.max(0, now - s.anchor) : 0);
 }
-export function values(s, now) {
+function valuesLegacy(s, now) {
   if (!s.ramp) return s.observations;
   const p = Math.min(
     1,
@@ -86,7 +90,7 @@ export function values(s, now) {
     ]),
   );
 }
-export function createSession(scenario, owner, now) {
+function createSessionLegacy(scenario, owner, now) {
   return {
     owner,
     confirmed:false,
@@ -125,7 +129,7 @@ export function createSession(scenario, owner, now) {
     oxygenFlow: scenario.stages[0].oxygenSetting?.flow ?? null,
   };
 }
-function stage(s, index, now, duration = 0) {
+function stage(s, index, now, duration = 0, applyProfile = false) {
   if (!Number.isInteger(index) || !s.scenario.stages[index])
     throw Error("Invalid stage");
   if (
@@ -135,13 +139,14 @@ function stage(s, index, now, duration = 0) {
     duration > 3600000
   )
     throw Error("Invalid change duration");
-  const old = values(s, now);
+  const old = valuesLegacy(s, now);
   s.stage = index;
   s.stageAt = elapsed(s, now);
   s.branch = null;
   s.activeRuleTargets={};
   s.confirmed = false;
   const target = s.scenario.stages[index];
+  if(s.scenario.engineVersion===2 && !applyProfile)return;
   s.observations = {
     ...target.observations,
     ...Object.fromEntries(
@@ -155,7 +160,7 @@ function stage(s, index, now, duration = 0) {
     ? { from: old, to: s.observations, at: elapsed(s, now), duration }
     : null;
 }
-export function applyCommand(original, c, now) {
+function applyCommandLegacy(original, c, now) {
   const s = structuredClone(original);
   if (s.events.some((e) => e.id === c.id)) return s;
   if (!c.id || typeof c.id !== "string" || c.id.length > 128)
@@ -178,12 +183,12 @@ export function applyCommand(original, c, now) {
       s.status = c.type === "end" ? "ended" : "paused";
       break;
     case "reset": {
-      const fresh = createSession(s.scenario, s.owner, now);
+      const fresh = createSessionLegacy(s.scenario, s.owner, now);
       Object.assign(s, fresh, { events: s.events, revision: s.revision });
       break;
     }
     case "stage":
-      stage(s, c.stage, now, c.duration || 0);
+      stage(s, c.stage, now, c.duration || 0, c.applyProfile===true);
       label = `Stage ${c.stage + 1}: ${s.scenario.stages[c.stage].name}`;
       break;
     case "signal":
@@ -301,7 +306,7 @@ export function applyCommand(original, c, now) {
       s.timeJumps ||= [];
       if (s.timeJumps.includes(jump.id)) return original;
       const before = elapsed(s, now);
-      const current = values(s, now);
+      const current = valuesLegacy(s, now);
       if (s.ramp) {
         const remaining = Math.max(0, s.ramp.duration - (before - s.ramp.at));
         s.ramp = remaining
@@ -330,7 +335,7 @@ export function applyCommand(original, c, now) {
       if (c.type === "action") {
         if (!["yes", "notyet"].includes(c.answer))
           throw Error("Invalid answer");
-        const firstYes = s.actions[a.id] !== "yes";
+        const firstYes = s.actions[a.id] !== "yes" && !s.engine?.learners?.records?.[a.id]?.everCompleted;
         s.actions[a.id] = c.answer;
         if (c.answer === "yes" && firstYes && a.response?.reviewed === true && !s.scenario.facultyPack) {
           for (const k of fields)
@@ -449,7 +454,7 @@ export function applyCommand(original, c, now) {
         label: `${b.name} · confirmed reviewed deterioration rule`,
         stage: s.stage,
         branch: b.id,
-        observations: values(s, now),
+        observations: valuesLegacy(s, now),
       });
     }
   }
@@ -480,13 +485,13 @@ export function applyCommand(original, c, now) {
       ...(s.branch ? { branch: s.branch } : {}),
       oxygen: s.oxygen,
       ventilation: s.ventilation,
-      observations: values(s, now),
+      observations: valuesLegacy(s, now),
     });
   s.revision++;
   s.updatedAt = now;
   return s;
 }
-export function monitorState(s, now) {
+function monitorStateLegacy(s, now) {
   const observations = (o) => Object.fromEntries(fields.map((k) => [k, o[k]]));
   return {
     patient: s.scenario.patient,
@@ -527,9 +532,9 @@ export function validateScenario(s) {
   const text = (v, n, max = 20000) => {
     if (typeof v !== "string" || v.length > max) throw Error(`Invalid ${n}`);
   };
-  const observation = (v) => {
-    if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 400)
-      throw Error("Invalid observations");
+  const observation = (v,k) => {
+    if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > (limits[k]?.[1]??400))
+      throw Error("Invalid or impossible observations");
   };
   if (
     !s ||
@@ -579,7 +584,7 @@ export function validateScenario(s) {
       throw Error("Invalid rhythm");
     if (!Array.isArray(st.actions))
       throw Error("Stage actions must be an array");
-    for (const k of fields) observation(st.observations?.[k]);
+    for (const k of fields) observation(st.observations?.[k],k);
     if (Object.keys(st.observations).some((k) => !fields.includes(k)))
       throw Error("Unsupported stage observation");
     for (const a of st.actions) {
@@ -599,7 +604,7 @@ export function validateScenario(s) {
           throw Error("Responses need explicit review and observations");
         for (const [k, v] of Object.entries(a.response.observations)) {
           if (!fields.includes(k)) throw Error("Unknown response observation");
-          observation(v);
+          observation(v,k);
         }
       }
     }
@@ -679,7 +684,7 @@ export function validateScenario(s) {
     if (b.observations)
       for (const [k, v] of Object.entries(b.observations)) {
         if (!fields.includes(k)) throw Error("Unknown branch observation");
-        observation(v);
+        observation(v,k);
       }
     for (const k of ["findings", "cues"])
       if (b[k] != null) text(b[k], k, 50000);
@@ -750,5 +755,76 @@ export function validateScenario(s) {
       throw Error("Invalid stage oxygen setting");
   }
   validateRules(s);
+  validateDomains(s);
   return s;
+}
+
+// Public entry points retain the original transport contract and use the pure domain engine.
+export function createSession(scenario,owner,now){const state=createSessionLegacy(scenario,owner,now);initialiseDomains(state,now);return state;}
+export function values(s,now){if(!s.engine)return valuesLegacy(s,now);const copy=structuredClone(s);if(copy.ramp){const legacy=valuesLegacy(copy,now);for(const k of fields)if(!copy.pins[k])copy.engine.patient.base[k]=legacy[k];}const p=resolvePatient(copy,simTime(copy,now));return Object.fromEntries(fields.map(k=>[k,p[k]]));}
+function replayBase(s,snapshot){const state={owner:s.owner,code:s.code,scenario:structuredClone(s.scenario),events:[],...structuredClone(snapshot)};state.engine.commands=[];state.engine.ids={};state.engine.checkpoints=[];state.engine.origin=structuredClone(snapshot);return state;}
+export function replaySession(s,commands=s.engine?.commands){if(!s.engine?.origin)throw Error("No replay origin; upgrade this session first");const base=replayBase(s,s.engine.origin);base.events=structuredClone(s.events.slice(0,s.engine.baselineEventCount));if((commands?.[0]?.sequence??1)!==1)throw Error("Full command ledger required for this replay");let state=base;for(const record of commands||[]){const result=processCommand(state,record.command,record.wall);if(result.accepted!==record.accepted)throw Error(`Replay outcome differs at command ${record.sequence}`);state=result.state;}return state;}
+export function forkFromCheckpoint(s,id,wall=0){const cp=s.engine?.checkpoints.find(c=>c.id===id);if(!cp)throw Error("Checkpoint unavailable");const result=replayBase(s,cp.state);result.events=structuredClone(s.events.slice(0,cp.eventCount));result.status="paused";result.elapsed=cp.at;result.anchor=wall;result.engine.session.lastWall=wall;result.engine.session.sequence=0;result.engine.origin=null;result.engine.baselineEventCount=result.events.length;initialiseReplayOrigin(result);return result;}
+function initialiseReplayOrigin(s){const copy=structuredClone(s);copy.engine.origin=null;copy.engine.commands=[];copy.engine.ids={};copy.engine.checkpoints=[];delete copy.owner;delete copy.code;delete copy.scenario;delete copy.events;s.engine.origin=copy;}
+export function processCommand(original,c,wall){
+ if(!c||typeof c.id!=="string"||!c.id||c.id.length>128)throw Error("Command identifier required");
+ const before=structuredClone(original);initialiseDomains(before,wall);
+ const known=before.engine.ids[c.id];if(known===canonical(c))return {state:original,accepted:true,duplicate:true};
+ let s=structuredClone(before);
+ try{
+  if(known)throw Error("Command identifier reused with different content");
+  if(!Number.isFinite(wall)||wall<s.engine.session.lastWall)throw Error("Out-of-order authoritative clock");
+  if(c.expectedRevision!=null&&c.expectedRevision!==s.revision)throw Error("State changed; refresh before applying this command");
+  const at=simTime(s,wall);s.engine.session.processingWall=wall;
+  if(s.ramp){const v=valuesLegacy(s,wall);for(const k of fields)if(!s.pins[k])s.engine.patient.base[k]=v[k];}
+  if(s.status==='running')advanceScheduler(s,at);
+  if(s.status==='ended'&&!['reset','note','tick','checkpoint'].includes(c.type))throw Error('Session ended');
+  if(c.type==='intervention'&&s.interventions?.[c.intervention]?.[c.state]===true)return {state:original,accepted:true,duplicate:true};
+  if(c.type==='timeJump'&&s.timeJumps?.includes(c.jump))return {state:original,accepted:true,duplicate:true};
+  if(c.type==='investigation'){
+    const item=s.scenario.investigations.find(i=>i.id===c.investigation);if(!item)throw Error('Unknown investigation');
+    let instance=s.engine.measurements.results.filter(r=>r.investigation===c.investigation).at(-1);
+    if(c.state==='requested')domainCommand(s,{...c,type:'investigationInstance'},at);
+    else{if(!instance){domainCommand(s,{...c,type:'investigationInstance',id:c.id+':request',state:'requested'},at);instance=s.engine.measurements.results.at(-1);}
+     if(c.state==='released'&&instance.acquiredAt==null)domainCommand(s,{...c,type:'investigationInstance',instance:instance.id,state:'acquired'},at);
+     domainCommand(s,{...c,type:'investigationInstance',instance:instance.id},at);
+    }
+    syncPatientForPause(s,at);
+  }else if(c.type==='timeJump'){
+   const jump=s.scenario.timeJumps?.find(j=>j.id===c.jump);if(!jump||jump.reviewed!==true||c.confirmed!==true)throw Error('A reviewed time jump needs faculty confirmation');if(!['running','paused'].includes(s.status))throw Error('Start the simulation before a time jump');
+   if(!s.timeJumps?.includes(jump.id)){s=applyCommandLegacy(s,c,wall);advanceScheduler(s,at+jump.advanceMs);}
+  }else if(domainCommand(s,{...c,wallAt:wall},at)){
+   if(c.type==='ruleFire'&&c.confirmed===true)s.confirmed=true;
+   if(s.status==='running'||['nibp','startEffect','investigationInstance','ruleFire'].includes(c.type))advanceScheduler(s,at,c);
+   else{syncPatientForPause(s,at);}
+  }else{
+   const previous=structuredClone(s);s=applyCommandLegacy(s,c,wall);
+   if(c.type==='reset'){
+    const history=previous.engine,fresh=createSession(s.scenario,s.owner,wall).engine;
+    s.engine={...fresh,eventSequence:history.eventSequence,origin:history.origin,baselineEventCount:history.baselineEventCount,ids:history.ids,commands:history.commands,checkpoints:history.checkpoints,session:{...fresh.session,sequence:history.session.sequence,lastWall:wall,connections:history.session.connections}};
+   }
+   else syncLegacyChange(s,c,previous,at);
+   if(s.stage!==previous.stage&&s.scenario.engineVersion!==2){for(const k of fields)s.engine.patient.base[k]=s.scenario.stages[s.stage].observations[k];}
+   if(s.ramp && !s.engine.scheduler.effects.some(e=>e.active)){const v=valuesLegacy(s,wall);for(const k of fields)if(!s.pins[k])s.engine.patient.base[k]=v[k];}
+   if(s.status==='running')advanceScheduler(s,simTime(s,wall),c);else syncPatientForPause(s,simTime(s,wall));
+  }
+  s.engine.teaching.stage=s.stage;s.engine.teaching.objectives=s.scenario.stages[s.stage].actions.filter(a=>s.actions[a.id]!=='yes').map(a=>a.objective);
+  recordCommand(s,c,wall,true);s.revision=original.revision+1;s.updatedAt=wall;
+  if(s.engine.session.sequence%25===0)checkpoint(s,`auto:${s.engine.session.sequence}`,'Automatic checkpoint',wall);
+  return {state:s,accepted:true,duplicate:false};
+ }catch(error){s=before;recordCommand(s,c,wall,false,error.message);s.revision=original.revision+1;s.updatedAt=Math.max(original.updatedAt,wall);return {state:s,accepted:false,error:error.message};}
+}
+function syncPatientForPause(s,at){syncPatient(s,at);refreshMeasurements(s,at);}
+function advanceSchedulerWithoutRules(s,at){const mode=s.mode;s.mode='manual';advanceScheduler(s,at);s.mode=mode;}
+export function applyCommand(original,c,now){const result=processCommand(original,c,now);if(!result.accepted)throw Error(result.error);return result.state;}
+export function monitorState(s,now){
+ const safe=monitorStateLegacy(s,now);if(!s.engine)return safe;
+ safe.measurements=publicMeasurements(s);safe.rhythmLabels=s.engine.teaching.rhythmLabels===true;safe.signalRate=resolvePatient(structuredClone(s),simTime(s,now)).hr;
+ safe.ramp=null;
+ for(const [sensor,field] of [['ecg','hr'],['spo2','spo2'],['rr','rr'],['temp','temp']]){const m=safe.measurements[sensor];if(typeof m.value==='number')safe.observations[field]=m.value;}
+ const bp=safe.measurements.nibp;safe.observations.sbp=bp.value.sbp;safe.observations.dbp=bp.value.dbp;
+ safe.released=s.engine.measurements.results.filter(r=>r.releasedAt!=null).map(r=>({id:r.investigation,name:r.name,instance:r.id,acquiredAt:r.acquiredAt,releasedAt:r.releasedAt}));
+ // Compatibility with pre-upgrade released cards (which have no acquisition instance).
+ for(const i of monitorStateLegacy(s,now).released)if(!safe.released.some(r=>r.id===i.id))safe.released.push(i);
+ return safe;
 }

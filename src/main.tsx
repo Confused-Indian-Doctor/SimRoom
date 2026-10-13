@@ -1,3 +1,4 @@
+import {timeline} from "./timeline.js";
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -40,6 +41,7 @@ import {
   InterventionControls,
   BranchControls,
 } from "./FacultySections";
+import {BackendAudit,PatientNow,EngineControls,InvestigationInstances,ReplaySandbox} from "./EngineControls";
 import { ScenarioEditor } from "./ScenarioEditor";
 import { Progression } from "./Progression";
 import { Pairing } from "./Pairing";
@@ -210,13 +212,25 @@ function App() {
     setSelected(s);
     setView("editor");
   };
-  function exportDebrief() {
+  async function exportDebrief() {
     if (!session) return;
+    let audit:unknown=null;
+    if(provider==='supabase'){try{audit=await call('audit',{session:sessionId})}catch(e){setError('Export failed to retrieve the full backend audit: '+(e as Error).message);return;}}
     const text = JSON.stringify(
       {
+        backendAudit:audit,
         scenario: session.scenario,
         events: session.events,
         interventions: session.interventions || {},
+        engineVersion:session.engine?.version,
+        patientState:session.engine?.patient,
+        measurements:session.engine?.measurements,
+        learnerRecords:session.engine?.learners,
+        scheduler:session.engine?.scheduler,
+        checkpoints:session.engine?.checkpoints,
+        replayOrigin:session.engine?.origin,
+        commands:session.engine?.commands,
+        randomSeed:session.engine?.session.seed,
         finalBranch: session.branch || null,
         timeJumps: session.timeJumps || [],
         finalOxygen: session.oxygen,
@@ -679,8 +693,8 @@ function App() {
               <strong>
                 {clock(
                   session.elapsed +
-                    (session.status === "running" && connected
-                      ? Math.max(0, now - session.anchor)
+                    (session.status === "running"
+                      ? Math.max(0, (connected?now:session.updatedAt) - session.anchor)
                       : 0),
                 )}
               </strong>
@@ -697,6 +711,7 @@ function App() {
                 </span>
               ))}
             </div>
+            <PatientNow session={session} now={connected?now:session.updatedAt} stale={!connected}/>
             <Progression session={session}/>
             <div className="controller-tabs">
               {["Actions", "Patient", "Control"].map((t) => (
@@ -793,6 +808,7 @@ function App() {
                             · {a.objective}
                           </span>
                           <h3>{a.text}</h3>
+                          <p>{session.engine?.learners.records[a.id]?.completedAt!=null?`Recorded ${clock(session.engine.learners.records[a.id].completedAt!)} · ${session.engine.learners.records[a.id].independent?'independent':'prompted'}`:'Outstanding'} · {a.response?.reviewed?'Reviewed response configured':session.scenario.schedulerRules?.some(r=>r.trigger.kind==='action'&&r.trigger.id===a.id)?'Configured scheduler rule; delivery/effectiveness conditions still apply':'Records action only'}</p>
                         </div>
                         <div className="action-buttons">
                           <button
@@ -943,6 +959,8 @@ function App() {
                   )}
                   {patientSection === "Investigations" && (
                     <>
+                      <InvestigationInstances session={session} command={cmd}/>
+                      <details><summary>Legacy investigation controls and asset preview</summary>
                       <h2>Investigations</h2>
                       <p className="help">
                         Request, release and interpretation are distinct. Early
@@ -1046,6 +1064,7 @@ function App() {
                         Assets attach through the scenario editor. This live
                         session retains its starting version.
                       </p>
+                      </details>
                     </>
                   )}
                 </>
@@ -1156,7 +1175,8 @@ function App() {
                     )}
                   </div>
                   <BranchControls session={session} command={cmd} />
-                  <section className="panel"><h2>Perfusion and signal quality</h2><label>Perfusion<select value={session.perfusion||"normal"} onChange={e=>void cmd("signal",{perfusion:e.target.value,quality:session.signalQuality||"clean"})}><option value="normal">Normal</option><option value="poor">Poor perfusion · reduced pleth</option><option value="absent">Absent perfusing pulse</option></select></label><label>Signal quality<select value={session.signalQuality||"clean"} onChange={e=>void cmd("signal",{perfusion:session.perfusion||"normal",quality:e.target.value})}><option value="clean">Clean</option><option value="artefact">Artefact</option></select></label><button onClick={()=>void cmd("signalScenario")}>Return signal to scenario control</button><p>Perfusion is independent of SpO₂. VF and asystole have no perfusing pleth or pulse beep.</p></section>
+                  <section className="panel"><h2>Perfusion and signal quality</h2><label>Perfusion<select aria-label="Perfusion" value={session.perfusion||"normal"} onChange={e=>void cmd("signal",{perfusion:e.target.value,quality:session.signalQuality||"clean"})}><option value="normal">Normal</option><option value="poor">Poor perfusion · reduced pleth</option><option value="absent">Absent perfusing pulse</option></select></label><label>Signal quality<select aria-label="Signal quality" value={session.signalQuality||"clean"} onChange={e=>void cmd("signal",{perfusion:session.perfusion||"normal",quality:e.target.value})}><option value="clean">Clean</option><option value="artefact">Artefact</option></select></label><button onClick={()=>void cmd("signalScenario")}>Return signal to scenario control</button><p>Perfusion is independent of SpO₂. VF and asystole have no perfusing pleth or pulse beep.</p></section>
+                  <EngineControls session={session} sessionId={sessionId} now={connected?now:session.updatedAt} command={cmd}/>
                   <h2>Manual observations</h2>
                   <p className="help">
                     An override stays pinned through stage changes until
@@ -1404,8 +1424,11 @@ function App() {
                         ))}
                       </>
                     )}
+                    {provider==='supabase'&&<BackendAudit sessionId={sessionId}/>}<ReplaySandbox session={session}/>
+                    <h2>Independent and prompted actions</h2>
+                    {Object.entries(session.engine?.learners.records||{}).filter(([,r])=>r.everCompleted).map(([id,r])=><p key={id}>{session.scenario.stages.flatMap(st=>st.actions).find(a=>a.id===id)?.text} · {r.independent?"independent":"prompted"} · {r.completedAt!=null?clock(r.completedAt):"earlier record"}</p>)}
                     <h2>Event timeline</h2>
-                    {session.events.map((e) => (
+                    {timeline(session.events).map((e) => (
                       <div className="timeline-row" key={e.id}>
                         <time>{clock(e.at)}</time>
                         <div>

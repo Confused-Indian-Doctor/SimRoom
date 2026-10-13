@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Volume2, VolumeX, Maximize, Activity } from "lucide-react";
-import type { MonitorState, Obs } from "./types";
+import {values as patientValues} from "./engine.js";
+import type { MonitorState, Obs, Session } from "./types";
 import { call } from "./backend";
 import { SignalClock } from "./signals.js";
 import { SignalCanvas } from "./SignalCanvas";
@@ -14,6 +15,7 @@ export function clock(ms: number) {
     )}:${Math.floor(ms / 1000) % 60 < 10 ? "0" : ""}${Math.floor(ms / 1000) % 60}`;
 }
 export function liveValues(s: MonitorState, now: number): Obs {
+  if((s as Session).engine)return patientValues(s as Session,now);
   if (!s.ramp) return s.observations;
   const time =
       s.elapsed + (s.status === "running" ? Math.max(0, now - s.anchor) : 0),
@@ -60,13 +62,16 @@ export function Monitor({
     );
     return () => clearInterval(i);
   }, [timing]);
-  const stale = !connected || now - s.updatedAt > 15000;
+  const stale = !connected || s.status==="running" && now - s.updatedAt > 15000;
   const o = liveValues(s, stale ? s.updatedAt : now);
+  const simulationTime=s.elapsed+(s.status==="running"?Math.max(0,(stale?s.updatedAt:now)-s.anchor):0);
+  const available=(sensor:string)=>!s.measurements || s.measurements[sensor]?.attached===true && !["lost","failed","detached"].includes(s.measurements[sensor]?.status);
+  const ecgAvailable=available('ecg'),plethAvailable=available('spo2');
   const alarming = o.spo2 < 90 || o.sbp < 90 || o.hr > 130;
   useEffect(() => {
     if (!alarming) setLocalAck(false);
   }, [alarming]);
-  const beep=()=>{if(!sound || stale || document.visibilityState!=="visible")return;const a=audio.current;if(!a)return;const osc=a.createOscillator(),g=a.createGain();osc.frequency.value=alarming&&!s.alarmAck&&!localAck?880:650;g.gain.value=.06;osc.connect(g);g.connect(a.destination);osc.start();osc.stop(a.currentTime+.06)};
+  const beep=()=>{if(!sound || stale || !plethAvailable || ["vf","asystole"].includes(s.rhythm||"") || document.visibilityState!=="visible")return;const a=audio.current;if(!a)return;const osc=a.createOscillator(),g=a.createGain();osc.frequency.value=alarming&&!s.alarmAck&&!localAck?880:650;g.gain.value=.06;osc.connect(g);g.connect(a.destination);osc.start();osc.stop(a.currentTime+.06)};
   useEffect(() => {
     let lock: WakeLockSentinel | undefined;
     const get = async () => {
@@ -86,11 +91,12 @@ export function Monitor({
       document.removeEventListener("visibilitychange", get);
     };
   }, [awake]);
-  const show = async (id: string) => {
+  const show = async (id: string,instance?:string) => {
     try {
       const r = await call<{ data: string; mime: string }>("asset", {
         session,
         investigation: id,
+        instance,
       });
       const b = Uint8Array.from(atob(r.data), (c) => c.charCodeAt(0));
       const url = URL.createObjectURL(new Blob([b], { type: r.mime }));
@@ -135,14 +141,12 @@ export function Monitor({
           <div className="trace-label green">
             ECG{" "}
             <span>
-              {s.rhythm
-                ? s.rhythm.toUpperCase()
-                : "RHYTHM UNSET · NO DIAGNOSTIC TRACE"}
+              {!ecgAvailable ? "LEAD OFF / SIGNAL LOST" : s.rhythmLabels && s.rhythm ? s.rhythm.toUpperCase() : s.rhythm ? "SIMULATED RHYTHM TRACE" : "RHYTHM UNSET · NO DIAGNOSTIC TRACE"}
             </span>
           </div>
-          <SignalCanvas reference={reference} clock={signalClock.current} perfusion={s.perfusion || "normal"} quality={s.signalQuality || "clean"}
-            rate={o.hr}
-            rhythm={s.rhythm}
+          <SignalCanvas reference={reference} clock={signalClock.current} perfusion={plethAvailable?s.perfusion || "normal":"absent"} quality={s.measurements?.ecg.quality==="artefact"||s.signalQuality==="artefact"?"artefact":"clean"}
+            rate={s.signalRate??o.hr}
+            rhythm={ecgAvailable?s.rhythm:null}
             onPulse={beep}
             active={!stale && s.status === "running"}
           />
@@ -151,14 +155,14 @@ export function Monitor({
           <label>
             HR <small>bpm</small>
           </label>
-          <strong>{s.rhythm==="vf"?"—":s.rhythm==="asystole"?"0":Math.round(o.hr)}</strong>
+          <strong>{!ecgAvailable?"—":s.rhythm==="vf"?"—":s.rhythm==="asystole"?"0":Math.round(o.hr)}</strong>
         </section>
         <section className="trace">
           <div className="trace-label cyan">
-            PLETH <span>SpO₂</span>
+            PLETH <span>{plethAvailable?"SIMULATED PULSE":"SENSOR OFF / SIGNAL LOST"}</span>
           </div>
-          <SignalCanvas reference={reference} clock={signalClock.current} perfusion={s.perfusion || "normal"} quality={s.signalQuality || "clean"}
-            rate={o.hr}
+          <SignalCanvas reference={reference} clock={signalClock.current} perfusion={plethAvailable?s.perfusion || "normal":"absent"} quality={s.measurements?.spo2.quality==="artefact"||s.signalQuality==="artefact"?"artefact":"clean"}
+            rate={s.signalRate??o.hr}
             rhythm={s.rhythm}
             pleth
             active={!stale && s.status === "running"}
@@ -168,7 +172,7 @@ export function Monitor({
           <label>
             SpO₂ <small>%</small>
           </label>
-          <strong>{Math.round(o.spo2)}</strong>
+          <strong>{plethAvailable?Math.round(o.spo2):"—"}</strong>
         </section>
       </div>
       <div className="lower-vitals">
@@ -177,23 +181,24 @@ export function Monitor({
             NIBP <small>mmHg</small>
           </label>
           <strong>
-            {Math.round(o.sbp)}
+            {available("nibp")?Math.round(o.sbp):"—"}
             <span>/</span>
-            {Math.round(o.dbp)}
+            {available("nibp")?Math.round(o.dbp):"—"}
           </strong>
-          <small>MAP {Math.round((o.sbp + 2 * o.dbp) / 3)}</small>
+          <small>MAP {Math.round((o.sbp + 2 * o.dbp) / 3)} · cuff reading age {clock(Math.max(0,simulationTime-(s.measurements?.nibp.at??0)))}</small>
+          {s.measurements?.nibp.status==="acquiring"&&<small>CUFF CYCLING · PREVIOUS READING HELD</small>}
         </section>
         <section className="numeric yellow">
           <label>
             {s.ventilation?.assisted ? "SPONT RR" : "RESP"} <small>/min</small>
           </label>
-          <strong>{Math.round(o.rr)}</strong>
+          <strong>{available("rr")?Math.round(o.rr):"—"}</strong>
         </section>
         <section className="numeric purple">
           <label>
             TEMP <small>°C</small>
           </label>
-          <strong>{o.temp.toFixed(1)}</strong>
+          <strong>{available("temp")?o.temp.toFixed(1):"—"}</strong>
         </section>
       </div>
       <div className="monitor-footer">
@@ -242,7 +247,7 @@ export function Monitor({
           </button>
         }
         {s.released.map((i) => (
-          <button key={i.id} onClick={() => void show(i.id)}>
+          <button key={i.instance||i.id} onClick={() => void show(i.id,i.instance)}>
             {i.name}
           </button>
         ))}

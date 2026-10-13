@@ -5,12 +5,15 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { randomBytes } from "node:crypto";
 import {
   applyCommand,
+  processCommand,
+  replaySession,
   createSession,
   monitorState,
   validateScenario,
 } from "./engine.js";
 initializeApp();
 const db = getFirestore();
+db.settings({ignoreUndefinedProperties:true});
 const options = { cors: true };
 function instructor(req) {
   if (!req.auth?.token.instructor)
@@ -49,13 +52,15 @@ export const join = onCall(options, async (req) => {
 export const command = onCall(options, async (req) => {
   const uid = instructor(req);
   const ref = db.doc("sessions/" + req.data.session);
-  return db.runTransaction(async (tx) => {
+  const outcome=await db.runTransaction(async (tx) => {
     const doc = await tx.get(ref);
     if (!doc.exists || doc.data().owner !== uid)
       throw new HttpsError("permission-denied", "Session owner required");
     let s;
     try {
-      s = applyCommand(doc.data(), req.data.command, Date.now());
+      const result=processCommand(doc.data(),req.data.command,Math.max(Date.now(),doc.data().updatedAt));
+      s=result.state;
+      if(!result.accepted){tx.set(ref,s);tx.set(db.doc("monitors/"+ref.id),monitorState(s,Date.now()));return {revision:s.revision,accepted:false,error:result.error};}
     } catch (e) {
       throw new HttpsError("invalid-argument", e.message);
     }
@@ -64,6 +69,8 @@ export const command = onCall(options, async (req) => {
     tx.set(db.doc("monitors/" + ref.id), monitorState(s, Date.now()));
     return { revision: s.revision };
   });
+  if(outcome.accepted===false)throw new HttpsError("invalid-argument",outcome.error);
+  return outcome;
 });
 export const saveScenario = onCall(options, async (req) => {
   instructor(req);
@@ -97,14 +104,15 @@ export const asset = onCall(options, async (req) => {
       .doc(`monitorMembers/${req.data.session}/users/${req.auth.uid}`)
       .get()
   ).exists;
+  const results=s.engine?.measurements.results||[],result=req.data.instance?results.find(r=>r.id===req.data.instance&&r.investigation===req.data.investigation):results.filter(r=>r.investigation===req.data.investigation&&r.releasedAt!=null).at(-1);
   if (
     !owned &&
-    (!member || !s.investigations[req.data.investigation]?.released)
+    (!member || (req.data.instance?!result||result.releasedAt==null:!s.investigations[req.data.investigation]?.released))
   )
     throw new HttpsError("permission-denied", "Result not released");
-  const i = s.scenario.investigations.find(
+  const definition = s.scenario.investigations.find(
     (i) => i.id === req.data.investigation,
-  );
+  ),i=result?.acquiredAt!=null?{...definition,report:result.report,assetPath:result.assetPath}:definition;
   if (i?.report)
     return {
       data: Buffer.from(i.report, "utf8").toString("base64"),
@@ -118,3 +126,5 @@ export const asset = onCall(options, async (req) => {
   const [b] = await f.download();
   return { data: b.toString("base64"), mime: meta.contentType };
 });
+
+export const replay = onCall(options,async req=>{const uid=instructor(req);const data=(await db.doc('sessions/'+req.data.session).get()).data();if(!data||data.owner!==uid)throw new HttpsError('permission-denied','Session owner required');const state=replaySession(data);return {state,matches:JSON.stringify(state.observations)===JSON.stringify(data.observations),commands:data.engine?.commands.length||0};});

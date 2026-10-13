@@ -15,6 +15,7 @@ export function ruleSummary(rule,scenario){
 }
 export function graphWarnings(s){
  const edges=new Map(s.stages.map((st,i)=>[st.id,[...(st.transition&&i<s.stages.length-1?[s.stages[i+1].id]:[]),...(st.rules||[]).flatMap(r=>[r.then.stage,r.otherwise].filter(Boolean))]]));
+ for(const r of s.schedulerRules||[])for(const effect of r.effects||[])if(effect.kind==='stage')for(const st of s.stages)if(st.id!==effect.id&&(!r.conditions?.some(c=>c.kind==='stage')||r.conditions.some(c=>c.kind==='stage'&&c.id===st.id)))edges.get(st.id)?.push(effect.id);
  const reachable=new Set();function visit(id){if(reachable.has(id))return;reachable.add(id);for(const to of edges.get(id)||[])visit(to)}visit(s.stages[0]?.id);
  const warnings=s.stages.filter(st=>!reachable.has(st.id)).map(st=>`${st.name}: unreachable in guided mode; manual selection remains available.`);
  const cycles=new Set(),colors=new Map();function cycle(id){if(colors.get(id)===1){cycles.add(id);return}if(colors.get(id)===2)return;colors.set(id,1);for(const to of edges.get(id)||[])cycle(to);colors.set(id,2)}for(const st of s.stages)cycle(st.id);

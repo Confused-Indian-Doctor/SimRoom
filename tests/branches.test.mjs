@@ -150,7 +150,7 @@ test("oxygen, assisted ventilation and low spontaneous RR coexist independently"
   assert.equal(s.observations.rr, 2);
   assert.equal(s.observations.spo2, 98);
   assert.equal(s.ventilation.rate, 10);
-  s = command(s, "stage", { stage: 3 });
+  s = command(s, "stage", { stage: 3 }, 10000);
   assert.equal(s.oxygenFlow, 4);
   assert.equal(s.oxygen, "Fixture oxygen at 4 L/min");
   const p = monitorState(s, 10000);

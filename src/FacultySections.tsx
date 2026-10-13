@@ -56,11 +56,14 @@ export function InterventionControls({
           <div className="intervention-buttons">
             {(
               [
+                "considered",
                 "requested",
                 "prescribed",
+                "prepared",
                 "administered",
                 "performed",
                 "effective",
+                "reassessed",
               ] as const
             ).map((state) => (
               <button

@@ -69,6 +69,9 @@ try {
   await command("stage", { stage: 2 });
   let publicData = (await getDoc(doc(monitor.db, "monitors", id))).data();
   assert.equal(publicData.observations.spo2, 86);
+  assert.equal(publicData.observations.sbp, 120); // Held initial cuff reading.
+  await command("nibp");
+  publicData = (await getDoc(doc(monitor.db, "monitors", id))).data();
   assert.equal(publicData.observations.sbp, 85);
   assert.equal(publicData.scenario, undefined);
   await assert.rejects(getDoc(doc(monitor.db, "sessions", id)));
@@ -130,6 +133,7 @@ try {
       session: ptx.id,
       command: { id: crypto.randomUUID(), type: "stage", stage },
     });
+    await owner.call('command',{session:ptx.id,command:{id:crypto.randomUUID(),type:'nibp'}});
     assert.deepEqual(
       (await getDoc(doc(monitor.db, "monitors", ptx.id))).data().observations,
       originalPTX.stages[stage].observations,
