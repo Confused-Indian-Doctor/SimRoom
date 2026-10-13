@@ -1,0 +1,11 @@
+rules_version = '2';
+service cloud.firestore { match /databases/{database}/documents {
+ function instructor() { return request.auth != null && request.auth.token.instructor == true; }
+ function owner(id) { return instructor() && get(/databases/$(database)/documents/sessions/$(id)).data.owner == request.auth.uid; }
+ match /scenarios/{id} { allow read: if instructor(); allow write: if false; }
+ match /sourceArchive/{id} { allow read: if instructor(); allow write: if false; }
+ match /sessions/{id} { allow read: if owner(id); allow write: if false; }
+ match /monitors/{id} { allow get: if request.auth != null && (owner(id) || exists(/databases/$(database)/documents/monitorMembers/$(id)/users/$(request.auth.uid))); allow list,write: if false; }
+ match /monitorMembers/{id}/users/{uid} { allow read,write: if false; }
+ match /{document=**} { allow read,write: if false; }
+}}

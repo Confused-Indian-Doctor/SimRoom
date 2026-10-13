@@ -1,0 +1,46 @@
+{
+  "name": "simroom",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b",
+    "test": "node --test tests/engine.test.mjs tests/branches.test.mjs",
+    "emulators": "firebase emulators:start --project demo-simroom",
+    "seed": "node scripts/seed.mjs",
+    "test:integration": "firebase emulators:exec --project demo-simroom 'node scripts/seed.mjs && node tests/integration.mjs'",
+    "test:browser": "firebase emulators:exec --project demo-simroom \"node scripts/seed.mjs && node tests/browser.mjs\"",
+    "build:emulator": "tsc -b && vite build --mode emulator --outDir dist-emulator",
+    "test:pwa": "npm run build:emulator && SIMROOM_PRODUCTION=1 npm run test:browser",
+    "supabase:prepare": "node scripts/supabase-prepare.mjs",
+    "test:supabase:sql": "npm run supabase:prepare && bash scripts/test-supabase-sql.sh",
+    "deploy:hosting": "npm run build && firebase deploy --only hosting --project simroom-60e9f",
+    "test:supabase:live": "supabase projects api-keys --project-ref qfghkzeifqhabxxdmabq --reveal --output json | node tests/supabase-live.mjs",
+    "packs:extract": "python scripts/extract-faculty-packs.py",
+    "packs:verify": "node scripts/verify-faculty-pack.mjs",
+    "prebuild": "node scripts/supabase-prepare.mjs",
+    "prebuild:emulator": "node scripts/supabase-prepare.mjs",
+    "test:supabase:ui": "supabase projects api-keys --project-ref qfghkzeifqhabxxdmabq --reveal --output json | node tests/pack-ui-live.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.117.3",
+    "firebase": "^12.0.0",
+    "lucide-react": "^0.468.0",
+    "qrcode.react": "^4.2.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.5.0",
+    "firebase-admin": "^13.0.0",
+    "firebase-tools": "^14.0.0",
+    "playwright": "^1.51.0",
+    "typescript": "^5.8.0",
+    "vite": "^6.3.0",
+    "vitest": "^3.2.0"
+  }
+}

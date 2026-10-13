@@ -1,0 +1,12 @@
+project_id = "simroom-free"
+[functions.simroom]
+verify_jwt = false
+
+[auth]
+site_url = "https://cidsimroom.web.app"
+additional_redirect_urls = ["https://cidsimroom.web.app/**", "https://simroom-60e9f.web.app/**"]
+enable_signup = true
+enable_anonymous_sign_ins = true
+[auth.email]
+enable_signup = true
+enable_confirmations = true
