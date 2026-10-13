@@ -49,6 +49,47 @@ Deno.serve(async (req) => {
     );
     if (["create", "command", "saveScenario"].includes(operation) && !faculty)
       return response({ message: "Instructor access required" }, 403);
+    const hash = async (text: string) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))).map(x=>x.toString(16).padStart(2,"0")).join("");
+    if (operation === "pairRedeem") {
+      if (!faculty) return response({message:"Sign in with an approved instructor account"},403);
+      const result = check(await db.rpc("redeem_pair", {p_hash:await hash(String(data.token || data.code || "").toUpperCase()),p_user:uid,p_device:String(data.device || ""),p_replace:data.replace===true}));
+      if (result.error) return response({message:result.error},409);
+      return response(result);
+    }
+    if (["pairCreate","pairStatus","pairDisconnect","pairEnd"].includes(operation)) {
+      const row=check(await db.from("sessions").select("id,owner,state").eq("id",data.session).maybeSingle());
+      const member=check(await db.from("monitor_members").select("user_id").eq("session_id",data.session).eq("user_id",uid).maybeSingle());
+      if (!row || !(member || faculty && row.owner===uid)) return response({message:"Session access required"},403);
+      const link=check(await db.from("controller_links").select("user_id,device,seen_at").eq("session_id",row.id).maybeSingle());
+      if(operation==="pairStatus") return response({pairingAvailable:!!check(await db.from("pair_challenges").select("session_id").eq("session_id",row.id).gt("expires_at",new Date().toISOString()).maybeSingle()),ended:row.state.status==="ended",connected:!!link && Date.now()-Date.parse(link.seen_at)<20000,paired:!!link,primary:!!link && link.user_id===uid && link.device===String(data.device||""),canEnd:faculty && (row.owner===uid || !!link && link.user_id===uid && link.device===String(data.device||"")),canDisconnect:faculty && (row.owner===uid || !!link && link.user_id===uid && link.device===String(data.device||""))});
+      if(operation==="pairEnd") {
+        if(!faculty || !(row.owner===uid || link?.user_id===uid && link?.device===String(data.device||"")))return response({message:"Controller or owner required"},403);
+        const current=check(await db.from("sessions").select("state,revision").eq("id",row.id).single());
+        const now=Number(check(await db.rpc("server_time")));const state=applyCommand(current.state,{id:crypto.randomUUID(),type:"end"},now);
+        const accepted=check(await db.rpc("commit_session",{p_id:row.id,p_owner:row.owner,p_expected:current.revision,p_state:state,p_public:monitorState(state,now)}));
+        if(!accepted)return response({message:"Session changed; retry ending"},409);return response({ended:true});
+      }
+      if(operation==="pairDisconnect") {
+        if(!faculty || !(row.owner===uid || link?.user_id===uid && link?.device===String(data.device||""))) return response({message:"Controller or session owner required"},403);
+        if(link)check(await db.from("revoked_controllers").upsert({session_id:row.id,user_id:link.user_id,device:link.device}));
+        check(await db.from("controller_links").delete().eq("session_id",row.id));
+        check(await db.from("pair_challenges").delete().eq("session_id",row.id));
+        return response({disconnected:true});
+      }
+      if(row.state.status==="ended") return response({message:"Session ended"},409);
+      const token=crypto.randomUUID().replaceAll("-","").toUpperCase();
+      const code=Array.from(crypto.getRandomValues(new Uint8Array(8)),x=>"23456789ABCDEFGHJKLMNPQRSTUVWXYZ"[x%31]).join("");
+      const expiresAt=Date.now()+120000;
+      check(await db.from("pair_challenges").upsert({session_id:row.id,token_hash:await hash(token),code_hash:await hash(code),expires_at:new Date(expiresAt).toISOString()}));
+      return response({token,code,expiresAt});
+    }
+    if (["saveDraft","loadDraft"].includes(operation)) {
+      if(!faculty) return response({message:"Instructor access required"},403);
+      if(operation==="loadDraft") return response(check(await db.from("scenario_drafts").select("data").eq("user_id",uid).eq("id",String(data.id)).maybeSingle()));
+      if(JSON.stringify(data.scenario).length>300000) throw Error("Draft exceeds size limit");
+      check(await db.from("scenario_drafts").upsert({user_id:uid,id:String(data.scenario.id),data:data.scenario,updated_at:new Date().toISOString()}));
+      return response({saved:true});
+    }
     if (operation === "create") {
       const scenario = check(
         await db
@@ -103,16 +144,19 @@ Deno.serve(async (req) => {
             .eq("id", data.session)
             .maybeSingle(),
         );
-        if (!row || row.owner !== uid)
+        if (!row)
           return response({ message: "Session owner required" }, 403);
         const now = Number(check(await db.rpc("server_time"))),
           state = applyCommand(row.state, data.command, now);
-        if (state.revision === row.revision)
-          return response({ revision: state.revision });
+        const link=check(await db.from("controller_links").select("user_id,device").eq("session_id",row.id).maybeSingle());
+        if(!faculty || (link ? link.user_id!==uid || link.device!==String(data.device||"") : row.owner!==uid)) return response({message:"Another device controls this session; pair or confirm takeover"},403);
+        if(check(await db.from("revoked_controllers").select("device").eq("session_id",row.id).eq("user_id",uid).eq("device",String(data.device||"")).maybeSingle()))return response({message:"Controller disconnected; pair again"},403);
+        if(state.revision===row.revision) return response({revision:state.revision});
         const accepted = check(
-          await db.rpc("commit_session", {
+          await db.rpc("control_commit", {
             p_id: row.id,
-            p_owner: uid,
+            p_actor: uid,
+            p_device: String(data.device || ""),
             p_expected: row.revision,
             p_state: state,
             p_public: monitorState(state, now),
@@ -149,7 +193,7 @@ Deno.serve(async (req) => {
           .maybeSingle(),
       );
       if (
-        !(faculty && row.owner === uid) &&
+        !(faculty && (row.owner === uid || !!check(await db.from("controller_links").select("user_id").eq("session_id",data.session).eq("user_id",uid).maybeSingle()))) &&
         (!member || !row.state.investigations[data.investigation]?.released)
       )
         return response({ message: "Result not released" }, 403);

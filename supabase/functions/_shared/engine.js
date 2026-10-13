@@ -1,3 +1,4 @@
+import {ruleMatches,ruleSummary,validateRules,limits} from "./rules.js";
 export const fields = ["hr", "spo2", "sbp", "dbp", "rr", "temp"];
 export const interventionStates = [
   "requested",
@@ -8,7 +9,7 @@ export const interventionStates = [
 ];
 export function activeProfile(s) {
   const b = s.scenario.branches?.find((b) => b.id === s.branch);
-  return { ...s.scenario.stages[s.stage].observations, ...b?.observations };
+  return { ...s.scenario.stages[s.stage].observations, ...b?.observations, ...s.activeRuleTargets };
 }
 export function conditionsMet(s, condition, now) {
   if (!condition) return true;
@@ -63,6 +64,7 @@ function selectBranch(s, b, now, confirmed) {
   )
     throw Error("Recovery needs a confirmed effective intervention");
   s.branch = b.id;
+  s.activeRuleTargets={};
   s.branchAt = elapsed(s, now);
   setProfile(s, b.observations || {}, now, b.durationMs || 0);
 }
@@ -87,6 +89,10 @@ export function values(s, now) {
 export function createSession(scenario, owner, now) {
   return {
     owner,
+    confirmed:false,
+    rhythmPinned:false,
+    signalPinned:false,
+    activeRuleTargets:{},
     scenario: structuredClone(scenario),
     stage: 0,
     status: "ready",
@@ -97,6 +103,8 @@ export function createSession(scenario, owner, now) {
     oxygen: scenario.stages[0].oxygen,
     oxygenPinned: false,
     rhythm: scenario.stages[0].rhythm,
+    perfusion: scenario.stages[0].perfusion || "normal",
+    signalQuality: scenario.stages[0].signalQuality || "clean",
     pins: {},
     actions: {},
     investigations: {},
@@ -109,6 +117,7 @@ export function createSession(scenario, owner, now) {
     interventions: {},
     branch: null,
     appliedBranches: [],
+    appliedRules: [],
     timeJumps: [],
     ventilation: { assisted: false, rate: null },
     oxygenDevice:
@@ -130,6 +139,7 @@ function stage(s, index, now, duration = 0) {
   s.stage = index;
   s.stageAt = elapsed(s, now);
   s.branch = null;
+  s.activeRuleTargets={};
   s.confirmed = false;
   const target = s.scenario.stages[index];
   s.observations = {
@@ -140,6 +150,7 @@ function stage(s, index, now, duration = 0) {
   };
   // Oxygen is a delivered intervention: stage selection never changes it.
   if (!s.rhythmPinned) s.rhythm = target.rhythm;
+  if (!s.signalPinned){s.perfusion=target.perfusion || "normal";s.signalQuality=target.signalQuality || "clean";}
   s.ramp = duration
     ? { from: old, to: s.observations, at: elapsed(s, now), duration }
     : null;
@@ -175,13 +186,18 @@ export function applyCommand(original, c, now) {
       stage(s, c.stage, now, c.duration || 0);
       label = `Stage ${c.stage + 1}: ${s.scenario.stages[c.stage].name}`;
       break;
+    case "signal":
+      if(!["normal","poor","absent"].includes(c.perfusion) || !["clean","artefact"].includes(c.quality))throw Error("Invalid signal setting");
+      s.perfusion=c.perfusion;s.signalQuality=c.quality;s.signalPinned=true;label=`Perfusion ${c.perfusion}; signal ${c.quality}`;break;
+    case "signalScenario":
+      s.signalPinned=false;s.perfusion=s.scenario.stages[s.stage].perfusion || "normal";s.signalQuality=s.scenario.stages[s.stage].signalQuality || "clean";break;
     case "override":
       if (
         !fields.includes(c.field) ||
         typeof c.value !== "number" ||
         !Number.isFinite(c.value) ||
         c.value < 0 ||
-        c.value > 400
+        c.value > limits[c.field][1]
       )
         throw Error("Invalid observation");
       s.observations[c.field] = c.value;
@@ -387,7 +403,7 @@ export function applyCommand(original, c, now) {
   }
   if (s.mode === "guided" && s.status === "running") {
     const t = s.scenario.stages[s.stage].transition;
-    if (t?.reviewed && t.combination && s.stage < 3) {
+    if (t?.reviewed && t.combination && s.stage < s.scenario.stages.length-1) {
       const checks = [];
       if (t.actions?.length)
         checks.push(t.actions.every((a) => s.actions[a] === "yes"));
@@ -437,6 +453,19 @@ export function applyCommand(original, c, now) {
       });
     }
   }
+  if(s.mode==="guided" && s.status==="running"){
+    const rules=s.scenario.stages[s.stage].rules || [];
+    const r=rules.find(r=>r.reviewed && !s.appliedRules?.includes(r.id) && (ruleMatches(r,s,elapsed(s,now)) || r.otherwise && r.when.some(c=>c.kind==="time" && elapsed(s,now)-s.stageAt>=c.afterMs)));
+    if(r){const matched=ruleMatches(r,s,elapsed(s,now));s.appliedRules ||= [];s.appliedRules.push(r.id);
+      const target=matched?r.then.stage:r.otherwise;
+      if(target)stage(s,s.scenario.stages.findIndex(st=>st.id===target),now,r.durationMs||0);
+      if(matched && r.then.observations){setProfile(s,r.then.observations,now,r.durationMs||0);s.activeRuleTargets={...s.activeRuleTargets,...r.then.observations};}
+      if(matched && r.then.release){const item=s.scenario.investigations.find(i=>i.id===r.then.release);if(item && (item.report||item.assetPath) && conditionsMet(s,item.releaseConditions,now) && !item.requireConfirmation){s.investigations[item.id] ||= {};s.investigations[item.id].released=true;s.events.push({id:c.id+"-release",at:elapsed(s,now),type:"investigation",label:`Released ${item.name}`,stage:s.stage});}}
+      s.events.push({id:c.id+"-rule",at:elapsed(s,now),type:"rule",label:matched?ruleSummary(r,s.scenario):`Explicit alternative → ${s.scenario.stages[s.stage].name}`,stage:s.stage,observations:values(s,now)});
+      if(matched && r.then.cue)s.events.push({id:c.id+"-cue",at:elapsed(s,now),type:"cue",label:r.then.cue,stage:s.stage});
+      s.confirmed=false;
+    }
+  }
   if (c.type !== "tick")
     s.events.push({
       id: c.id,
@@ -484,6 +513,8 @@ export function monitorState(s, now) {
       rate: s.ventilation?.rate ?? null,
     },
     rhythm: s.rhythm,
+    perfusion: ["normal","poor","absent"].includes(s.perfusion)?s.perfusion:"normal",
+    signalQuality:s.signalQuality==="artefact"?"artefact":"clean",
     revision: s.revision,
     updatedAt: now,
     alarmAck: s.alarmAck,
@@ -503,12 +534,12 @@ export function validateScenario(s) {
   if (
     !s ||
     !Array.isArray(s.stages) ||
-    s.stages.length !== 4 ||
+    (s.stages.length < 1 || s.stages.length > 30) ||
     !Array.isArray(s.investigations) ||
     !Array.isArray(s.objectives)
   )
     throw Error(
-      "Scenario must have four stages, investigations and objectives",
+      "Scenario must have 1–30 stages, investigations and objectives",
     );
   for (const k of [
     "id",
@@ -542,6 +573,8 @@ export function validateScenario(s) {
       "sourceTrigger",
     ])
       text(st[k], k);
+    if(st.perfusion!=null && !["normal","poor","absent"].includes(st.perfusion))throw Error("Invalid perfusion");
+    if(st.signalQuality!=null && !["clean","artefact"].includes(st.signalQuality))throw Error("Invalid signal quality");
     if (![null, "sinus", "vf", "asystole"].includes(st.rhythm))
       throw Error("Invalid rhythm");
     if (!Array.isArray(st.actions))
@@ -677,7 +710,7 @@ export function validateScenario(s) {
       throw Error("Unknown branch/release condition identifier");
     if (
       (c.stage != null &&
-        (!Number.isInteger(c.stage) || c.stage < 0 || c.stage > 3)) ||
+        (!Number.isInteger(c.stage) || c.stage < 0 || c.stage >= s.stages.length)) ||
       (c.afterMs != null && (!Number.isFinite(c.afterMs) || c.afterMs < 0)) ||
       (c.clock != null && !["session", "stage", "branch"].includes(c.clock))
     )
@@ -716,5 +749,6 @@ export function validateScenario(s) {
     )
       throw Error("Invalid stage oxygen setting");
   }
+  validateRules(s);
   return s;
 }

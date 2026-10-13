@@ -2,6 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Volume2, VolumeX, Maximize, Activity } from "lucide-react";
 import type { MonitorState, Obs } from "./types";
 import { call } from "./backend";
+import { SignalClock } from "./signals.js";
+import { SignalCanvas } from "./SignalCanvas";
+import { Pairing } from "./Pairing";
 export function clock(ms: number) {
   return `${Math.floor(ms / 60000)
     .toString()
@@ -27,77 +30,6 @@ export function liveValues(s: MonitorState, now: number): Obs {
     ]),
   ) as Obs;
 }
-function Wave({
-  rate,
-  rhythm,
-  pleth,
-  active,
-}: {
-  rate: number;
-  rhythm: string | null;
-  pleth?: boolean;
-  active: boolean;
-}) {
-  const ref = useRef<HTMLCanvasElement>(null);
-  useEffect(() => {
-    let frame = 0;
-    const draw = (t: number) => {
-      const c = ref.current;
-      if (!c) return;
-      const dpr = devicePixelRatio || 1,
-        w = c.clientWidth,
-        h = c.clientHeight;
-      c.width = w * dpr;
-      c.height = h * dpr;
-      const ctx = c.getContext("2d")!;
-      ctx.scale(dpr, dpr);
-      ctx.clearRect(0, 0, w, h);
-      if (!pleth && !rhythm) {
-        frame = requestAnimationFrame(draw);
-        return;
-      }
-      ctx.strokeStyle = pleth ? "#43dcf5" : "#6de79b";
-      ctx.lineWidth = 2;
-      ctx.shadowBlur = 5;
-      ctx.shadowColor = ctx.strokeStyle;
-      ctx.beginPath();
-      const period = 60 / Math.max(rate, 1);
-      for (let x = 0; x < w; x++) {
-        const p = ((x / 100 + (active ? t / 1000 : 0)) / period) % 1;
-        let v = 0;
-        if (pleth) v = Math.pow(Math.sin(Math.PI * p), 4) * 0.6;
-        else if (rhythm === "sinus") {
-          v =
-            0.12 * Math.exp(-Math.pow((p - 0.16) / 0.035, 2)) -
-            0.18 * Math.exp(-Math.pow((p - 0.36) / 0.014, 2)) +
-            0.95 * Math.exp(-Math.pow((p - 0.39) / 0.012, 2)) -
-            0.25 * Math.exp(-Math.pow((p - 0.42) / 0.02, 2)) +
-            0.22 * Math.exp(-Math.pow((p - 0.66) / 0.08, 2));
-        } else if (rhythm === "vf")
-          v = 0.25 * Math.sin(x * 0.22 + t * 0.013) + 0.15 * Math.sin(x * 0.11);
-        const y = h * 0.62 - v * h * 0.5;
-        if (x === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
-      ctx.stroke();
-      frame = requestAnimationFrame(draw);
-    };
-    frame = requestAnimationFrame(draw);
-    return () => cancelAnimationFrame(frame);
-  }, [rate, rhythm, pleth, active]);
-  return (
-    <canvas
-      ref={ref}
-      aria-label={
-        pleth
-          ? "Pleth waveform"
-          : rhythm
-            ? "ECG monitor waveform"
-            : "Rhythm not configured"
-      }
-    />
-  );
-}
 export function Monitor({
   s,
   connected,
@@ -119,6 +51,8 @@ export function Monitor({
     [localAck, setLocalAck] = useState(false),
     [err, setErr] = useState("");
   const audio = useRef<AudioContext | null>(null);
+  const signalClock=useRef(new SignalClock());
+  const reference=useMemo(()=>({time:(s.elapsed+(s.status==="running"?Math.max(0,s.updatedAt-s.anchor):0))/1000,local:performance.now()}),[s.elapsed,s.anchor,s.updatedAt,s.status]);
   useEffect(() => {
     const i = setInterval(
       () => setNow(timing.server + performance.now() - timing.local),
@@ -132,25 +66,7 @@ export function Monitor({
   useEffect(() => {
     if (!alarming) setLocalAck(false);
   }, [alarming]);
-  useEffect(() => {
-    if (!sound || stale || s.status !== "running") return;
-    const i = setInterval(
-      () => {
-        const a = audio.current;
-        if (!a) return;
-        const osc = a.createOscillator(),
-          g = a.createGain();
-        osc.frequency.value = alarming && !s.alarmAck && !localAck ? 880 : 650;
-        g.gain.value = 0.06;
-        osc.connect(g);
-        g.connect(a.destination);
-        osc.start();
-        osc.stop(a.currentTime + 0.06);
-      },
-      60000 / Math.max(o.hr, 1),
-    );
-    return () => clearInterval(i);
-  }, [sound, stale, s.status, o.hr, alarming, s.alarmAck, localAck]);
+  const beep=()=>{if(!sound || stale || document.visibilityState!=="visible")return;const a=audio.current;if(!a)return;const osc=a.createOscillator(),g=a.createGain();osc.frequency.value=alarming&&!s.alarmAck&&!localAck?880:650;g.gain.value=.06;osc.connect(g);g.connect(a.destination);osc.start();osc.stop(a.currentTime+.06)};
   useEffect(() => {
     let lock: WakeLockSentinel | undefined;
     const get = async () => {
@@ -224,9 +140,10 @@ export function Monitor({
                 : "RHYTHM UNSET · NO DIAGNOSTIC TRACE"}
             </span>
           </div>
-          <Wave
+          <SignalCanvas reference={reference} clock={signalClock.current} perfusion={s.perfusion || "normal"} quality={s.signalQuality || "clean"}
             rate={o.hr}
             rhythm={s.rhythm}
+            onPulse={beep}
             active={!stale && s.status === "running"}
           />
         </section>
@@ -234,13 +151,13 @@ export function Monitor({
           <label>
             HR <small>bpm</small>
           </label>
-          <strong>{Math.round(o.hr)}</strong>
+          <strong>{s.rhythm==="vf"?"—":s.rhythm==="asystole"?"0":Math.round(o.hr)}</strong>
         </section>
         <section className="trace">
           <div className="trace-label cyan">
             PLETH <span>SpO₂</span>
           </div>
-          <Wave
+          <SignalCanvas reference={reference} clock={signalClock.current} perfusion={s.perfusion || "normal"} quality={s.signalQuality || "clean"}
             rate={o.hr}
             rhythm={s.rhythm}
             pleth
@@ -295,6 +212,7 @@ export function Monitor({
             : "Observations displayed"}
         </span>
       </div>
+      <Pairing session={session} connected={connected}/>
       <div className="monitor-tools">
         <button
           onClick={() => {
@@ -330,7 +248,7 @@ export function Monitor({
         ))}
       </div>
       {err && <p role="alert">{err}</p>}
-      <p className="monitor-disclaimer">SIMULATED PATIENT · EDUCATIONAL USE</p>
+      <p className="monitor-disclaimer">SIMULATED SIGNALS · EDUCATIONAL USE · SINGLE-LEAD RHYTHM DOES NOT EXCLUDE STEMI</p>
     </main>
   );
 }

@@ -26,7 +26,6 @@ import {
   watchScenarios,
   watchSessions,
   watchSession,
-  uploadAsset,
   call,
   emulator,
   backendReady,
@@ -41,6 +40,9 @@ import {
   InterventionControls,
   BranchControls,
 } from "./FacultySections";
+import { ScenarioEditor } from "./ScenarioEditor";
+import { Progression } from "./Progression";
+import { Pairing } from "./Pairing";
 import "./styles.css";
 function App() {
   const [user, setUser] = useState<BackendUser | null>(null),
@@ -50,7 +52,7 @@ function App() {
     [sessions, setSessions] = useState<Session[]>([]),
     [selected, setSelected] = useState<Scenario | null>(null),
     [view, setView] = useState("library"),
-    [sessionId, setSessionId] = useState(""),
+    [sessionId, setSessionId] = useState(location.pathname === "/controller" ? localStorage.getItem("cidsimroom-controller-session") || "" : ""),
     [session, setSession] = useState<Session | null>(null),
     [monitor, setMonitor] = useState<MonitorState | null>(null),
     [connected, setConnected] = useState(false),
@@ -64,13 +66,24 @@ function App() {
       new URLSearchParams(location.search).get("code") || "",
     ),
     [note, setNote] = useState(""),
-    [editor, setEditor] = useState(""),
     [duration, setDuration] = useState(0),
     [showQR, setShowQR] = useState(false),
     [notice, setNotice] = useState(""),
     [patientSection, setPatientSection] = useState("History");
   const timing = useRef({ server: Date.now(), local: performance.now() });
   const isMonitor = location.pathname === "/monitor";
+  const [pairCode,setPairCode]=useState(new URLSearchParams(location.search).get("pair") || "");
+  const [pairMessage,setPairMessage]=useState("");
+  async function redeemPair(replace=false){
+    try {const r=await call<{id?:string;replacementRequired?:boolean}>("pairRedeem",{token:pairCode.trim().toUpperCase(),replace});
+      if(r.replacementRequired){if(confirm("Another phone controls this session. Replace it and revoke its control?"))await redeemPair(true);return}
+      if(r.id){localStorage.setItem("cidsimroom-controller-session",r.id);setSessionId(r.id);setView("controller");setPairMessage("Connected to the monitor session");setPairCode("");history.replaceState(null,"","/controller");}
+    }catch(e){setPairMessage((e as Error).message)}
+  }
+  const pairingAttempt=useRef(false);
+  useEffect(()=>{if(instructor && pairCode && location.pathname==="/controller" && !pairingAttempt.current){pairingAttempt.current=true;void redeemPair()}},[instructor]);
+  useEffect(()=>{if(sessionId && location.pathname==="/controller"){localStorage.setItem("cidsimroom-controller-session",sessionId);setView("controller")}},[sessionId]);
+
   useEffect(
     () =>
       watchAuth((u) => {
@@ -186,6 +199,8 @@ function App() {
       const r = await call<{ id: string }>("create", { scenario: s.id });
       setSession(null);
       setShowQR(false);
+      localStorage.setItem("cidsimroom-controller-session",r.id);
+      history.replaceState(null,"","/controller");
       setSessionId(r.id);
       setView("controller");
       setTab("Actions");
@@ -193,7 +208,6 @@ function App() {
   }
   const openEditor = (s: Scenario) => {
     setSelected(s);
-    setEditor(JSON.stringify(s, null, 2));
     setView("editor");
   };
   function exportDebrief() {
@@ -521,7 +535,7 @@ function App() {
                   </div>
                   <div className="case-body">
                     <div className="case-meta">
-                      <span>4 stages</span>
+                      <span>{s.stages.length} stages</span>
                       <span>
                         <Clock size={13} /> Faculty-paced + debrief
                       </span>
@@ -532,6 +546,7 @@ function App() {
                       <span>{s.patient}</span>
                       <span>v{s.version}</span>
                     </div>
+                    <button disabled={busy} onClick={()=>void run(async()=>{const r=await call<{id:string;code:string}>("create",{scenario:s.id});location.assign(`/monitor?code=${r.code}`)})}>Start on this monitor</button>
                     <div className="case-buttons">
                       <button
                         className="primary"
@@ -682,6 +697,7 @@ function App() {
                 </span>
               ))}
             </div>
+            <Progression session={session}/>
             <div className="controller-tabs">
               {["Actions", "Patient", "Control"].map((t) => (
                 <button
@@ -1140,6 +1156,7 @@ function App() {
                     )}
                   </div>
                   <BranchControls session={session} command={cmd} />
+                  <section className="panel"><h2>Perfusion and signal quality</h2><label>Perfusion<select value={session.perfusion||"normal"} onChange={e=>void cmd("signal",{perfusion:e.target.value,quality:session.signalQuality||"clean"})}><option value="normal">Normal</option><option value="poor">Poor perfusion · reduced pleth</option><option value="absent">Absent perfusing pulse</option></select></label><label>Signal quality<select value={session.signalQuality||"clean"} onChange={e=>void cmd("signal",{perfusion:session.perfusion||"normal",quality:e.target.value})}><option value="clean">Clean</option><option value="artefact">Artefact</option></select></label><button onClick={()=>void cmd("signalScenario")}>Return signal to scenario control</button><p>Perfusion is independent of SpO₂. VF and asystole have no perfusing pleth or pulse beep.</p></section>
                   <h2>Manual observations</h2>
                   <p className="help">
                     An override stays pinned through stage changes until
@@ -1413,102 +1430,9 @@ function App() {
                 )}
           </main>
         )}
-        {view === "editor" && selected && (
-          <main className="content-page">
-            <div className="eyebrow">VERSIONED SCENARIO AUTHORING</div>
-            <h1>Edit {selected.title}</h1>
-            <p>
-              Save a new version after review. Running sessions retain their
-              starting snapshot.
-            </p>
-            <div className="review-banner">
-              <strong>Review before guided playback</strong>
-              <p>
-                Use null for unspecified settings. A transition needs reviewed:
-                true, combination: "all" or "any", and action IDs, afterMs or
-                requireConfirmation. A response needs reviewed: true and
-                observations. Times and response values are faculty-authored.
-              </p>
-            </div>
-            <label>
-              Import reviewed scenario JSON
-              <input
-                type="file"
-                accept="application/json,.json"
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file)
-                    void run(async () => {
-                      const text = await file.text();
-                      const draft = JSON.parse(text) as Scenario;
-                      setSelected(draft);
-                      setEditor(JSON.stringify(draft, null, 2));
-                    });
-                }}
-              />
-            </label>
-            <label>
-              Structured scenario editor
-              <textarea
-                className="json-editor"
-                spellCheck={false}
-                value={editor}
-                onChange={(e) => setEditor(e.target.value)}
-              />
-            </label>
-            <div className="button-row">
-              <button
-                className="primary"
-                disabled={busy}
-                onClick={() =>
-                  void run(async () => {
-                    const r = await call<{ version: number }>("saveScenario", {
-                      scenario: JSON.parse(editor),
-                    });
-                    setError(`Saved version ${r.version}`);
-                    setView("library");
-                  })
-                }
-              >
-                Save new version
-              </button>
-              <button
-                onClick={() => setEditor(JSON.stringify(selected, null, 2))}
-              >
-                Restore loaded version
-              </button>
-            </div>
-            <h2>Attach investigation assets</h2>
-            <p>
-              Uploads remain private. Attach to this draft, then save a new
-              version before creating a session.
-            </p>
-            {selected.investigations.map((i) => (
-              <label className="panel" key={i.id}>
-                {i.name}
-                <input
-                  type="file"
-                  accept="image/*,application/pdf"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (!file) return;
-                    void run(async () => {
-                      if (file.size > 10 * 1024 * 1024)
-                        throw Error("Maximum asset size is 10 MB");
-                      const path = `investigations/${user!.uid}/${crypto.randomUUID()}-${file.name}`;
-                      await uploadAsset(path, file);
-                      const draft = JSON.parse(editor) as Scenario;
-                      draft.investigations.find(
-                        (x) => x.id === i.id,
-                      )!.assetPath = path;
-                      setEditor(JSON.stringify(draft, null, 2));
-                    });
-                  }}
-                />
-              </label>
-            ))}
-          </main>
-        )}
+        {location.pathname==="/controller" && <section className="panel"><p role="status">{pairMessage}</p>{!sessionId && <form onSubmit={e=>{e.preventDefault();void redeemPair()}}><label>Phone pairing code<input value={pairCode} onChange={e=>setPairCode(e.target.value.toUpperCase())}/></label><button>Connect to monitor</button></form>}{sessionId && <Pairing session={sessionId} connected={connected} controller onEnd={()=>{if(confirm("End this simulation?"))void cmd("end")}}/>}</section>}
+        {view === "editor" && selected && <ScenarioEditor key={selected.id} scenario={selected} onSaved={()=>setNotice("Saved new version; live session unchanged")}/>}
+
       </div>
     </div>
   );

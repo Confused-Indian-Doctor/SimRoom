@@ -1,3 +1,4 @@
+export type Rule={id:string;reviewed:boolean;match:"all"|"any";when:({kind:"action"|"effective";id:string}|{kind:"time";afterMs:number}|{kind:"confirmation"})[];then:{stage?:string;observations?:Partial<Obs>;release?:string;cue?:string};durationMs?:number;otherwise?:string;sourceNote:string};
 export type Obs = {
   hr: number;
   spo2: number;
@@ -93,10 +94,18 @@ export type Scenario = {
   stages: {
     id: string;
     name: string;
+    rules?: Rule[];
     observations: Obs;
+    originalObservations?: Obs;
+    observationsProvenance?: "original" | "faculty-authored";
     oxygen: string;
     oxygenSetting?: { device: string; flow: number | null };
     rhythm: string | null;
+    perfusion?: "normal" | "poor" | "absent";
+    signalQuality?: "clean" | "artefact";
+    description?: string;
+    consciousness?: string;
+    debrief?: string;
     findings: string;
     cues: string;
     sourceTrigger: string;
@@ -140,6 +149,8 @@ export type MonitorState = {
   oxygenFlow?: number | null;
   ventilation?: { assisted: boolean; rate: number | null };
   rhythm: string | null;
+  perfusion?: "normal" | "poor" | "absent";
+  signalQuality?: "clean" | "artefact";
   revision: number;
   updatedAt: number;
   alarmAck: boolean;

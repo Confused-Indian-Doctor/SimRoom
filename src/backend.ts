@@ -25,7 +25,8 @@ export function watchAuth(callback:(u:BackendUser|null)=>void){if(!backendReady)
 export const signIn=async(email:string,password:string)=>(await adapter()).signIn(email,password);
 export const logOut=async()=>(await adapter()).signOut();
 export const signAnonymous=async()=>(await adapter()).anonymous();
-export const call=async<T>(name:string,data:unknown):Promise<T>=>{if(!backendReady)throw Error('Workspace setup is incomplete');return (await adapter()).call<T>(name,data)};
+export function controllerDevice(){let id=localStorage.getItem("cidsimroom-device");if(!id){id=crypto.randomUUID();localStorage.setItem("cidsimroom-device",id)}return id}
+export const call=async<T>(name:string,data:unknown):Promise<T>=>{if(!backendReady)throw Error('Workspace setup is incomplete');return (await adapter()).call<T>(name,{...(data as Record<string,unknown>),device:controllerDevice()})};
 export const watchScenarios=(callback:(s:Scenario[])=>void,error:(e:Error)=>void)=>subscribe(a=>a.scenarios(callback,error),error);
 export const watchSessions=(uid:string,callback:(s:Session[])=>void,error:(e:Error)=>void)=>subscribe(a=>a.sessions(uid,callback,error),error);
 export const watchSession=(id:string,monitor:boolean,callback:(s:Session|MonitorState,connected:boolean)=>void,error:(e:Error)=>void,connection:(c:boolean)=>void)=>subscribe(a=>a.session(id,monitor,callback,error,connection),error);

@@ -43,7 +43,7 @@ STEMI, PTX and PE checklists and histories are extracted from the supplied DOCX 
 
 Timers, rhythms, transition combinations, oxygen branches and treatment responses are unset. No ECG, CXR, ABG report, medication dose or post-decompression recovery profile has been invented. Stage advancement in manual mode deliberately applies the source stage profile; faculty decide when the profile is appropriate. The STEMI stage-3 “hypotension” wording accompanies 116/76, needing faculty clarification. The source's history-gated ECG cue is preserved as source wording but is not a software lock. PTX recognition and performed decompression stay distinct. PE help calls/SBAR do not change physiology.
 
-The JSON scenario editor exposes all scenario fields. A reviewed transition example (values are faculty settings, not imported clinical facts):
+The visual scenario editor is the primary authoring interface. The underlying schema retains legacy reviewed transitions; an example (values are faculty settings, not imported clinical facts):
 
 ```json
 {"reviewed":true,"combination":"all","actions":["replace-with-action-id"],"requireConfirmation":true}
@@ -116,3 +116,9 @@ For repeatable deployed checks, install Supabase CLI 2.120.0, sign in with the o
 See [FACULTY-PACK-UPDATE.md](docs/FACULTY-PACK-UPDATE.md) for the extended scenario schema, import workflow and source-material gap. This update adds confirmed intervention states, reviewed branches, explicit time jumps, independent oxygen/assisted ventilation, supplied text investigations and phone sections while preserving the existing app. The four new complete packs are missing; the three older source cases remain unchanged and no opioid case or new medication guidance has been invented.
 
 Existing production installations apply `supabase/migrations/202610130001_monitor_delivery.sql`, prepare and deploy the shared engine/Edge Function, then deploy Hosting. Initial installations can use the regenerated setup.sql. Do not rerun initial setup on an existing installation. A longer `FUNCTIONS_DISCOVERY_TIMEOUT=60` may be needed when running Firebase emulator checks in a constrained environment.
+
+## Monitor-to-phone pairing and visual editing
+
+Select **Start on this monitor**, then **Connect phone controller**. Scan with a normal phone camera and sign in as an approved instructor: the single-use, two-minute QR pairs that exact session. An eight-character code is available as a fallback. Primary-controller takeover is confirmed explicitly. The app now has continuous synthetic ECG/pleth, independent perfusion/artefact controls, a scenario progression panel and a visual Outline/Flow editor with rule builder, private drafts, undo/redo and an isolated preview. Running versions are preserved.
+
+See [pairing, signals, editor and deployment instructions](docs/PAIRING-WAVEFORMS-EDITOR.md). Existing installations apply migrations `202610130002_pairing.sql` and `202610130003_primary_claim.sql` rather than rerunning initial setup. The retained Firebase emulator does not implement the new Supabase pairing/draft operations. Physical Android/iOS tests and the four missing new faculty packs remain outstanding.
