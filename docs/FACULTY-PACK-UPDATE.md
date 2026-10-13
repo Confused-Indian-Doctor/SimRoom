@@ -51,4 +51,10 @@ Deployment succeeded for the monitor-field migration, authenticated Supabase Edg
 
 ## GitHub publication status
 
-The existing app and update are committed locally on feature/faculty-pack-support. Both authenticated Git push and the connected GitHub branch-creation API were rejected with HTTP 403 (Resource not accessible by integration). No remote commit or PR is claimed. Enable repository write access (Contents: read/write) for the GitHub connection on Confused-Indian-Doctor/SimRoom, then push this branch and open its PR. Local source and Git-history delivery archives preserve the work.
+Repository write access was granted on 2026-10-13. The existing app and update are published on feature/faculty-pack-support through the connected GitHub API; the terminal's saved GitHub token remains stale. The initial published source tree was verified identical to the tested local tree.
+
+Published code commit: https://github.com/Confused-Indian-Doctor/SimRoom/commit/14106fd47fe3edd54c4efc2549d3abf775c92cc6
+
+Draft PR: https://github.com/Confused-Indian-Doctor/SimRoom/pull/1
+
+The PR remains draft because the four new authoritative faculty packs have not been attached. Engine/interface deployment and the test results above succeeded; full pack-content import and clinical comparison remain pending.
